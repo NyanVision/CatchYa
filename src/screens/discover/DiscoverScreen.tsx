@@ -1,7 +1,9 @@
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useMemo, useState } from "react";
 import { Alert, FlatList, Image, Modal, Pressable, StyleSheet, Text, View } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import { useFocusEffect } from "@react-navigation/native";
+import { useDiscoveryExpiry } from "@/hooks/useDiscoveryExpiry";
+import type { DiscoveryPreferences } from "@/services/discoveryPreferences";
 import { Button } from "@/components/Button";
 import { filterProfilesByAudience, getDiscoverableProfiles, nearbyProfiles, type NearbyProfile } from "@/services/discovery";
 import { loadDiscoveryPreferences, saveDiscoveryPreferences } from "@/services/discoveryPreferences";
@@ -36,6 +38,7 @@ export function DiscoverScreen({ navigation }: Props) {
 
   useFocusEffect(useCallback(() => {
     let active = true;
+    setDiscoveryReady(false);
     Promise.all([loadDiscoveryPreferences(userId), loadBlockedProfiles(), loadAboutYouPreferences(userId)]).then(([preferences, blocked, aboutYou]) => {
       if (!active) return;
       setDiscoveryOn(preferences.enabled);
@@ -54,15 +57,12 @@ export function DiscoverScreen({ navigation }: Props) {
     return () => { active = false; };
   }, [userId]));
 
-  useEffect(() => {
-    if (!expiresAt) return;
-    const timer = setTimeout(() => {
-      setDiscoveryOn(false);
-      setExpiresAt(null);
-      void saveDiscoveryPreferences(userId, false, selectedDuration);
-    }, Math.max(0, expiresAt - Date.now()));
-    return () => clearTimeout(timer);
-  }, [expiresAt, selectedDuration, userId]);
+  const applyDiscovery = useCallback((preferences: DiscoveryPreferences) => {
+    setDiscoveryOn(preferences.enabled);
+    setSelectedDuration(preferences.duration);
+    setExpiresAt(preferences.expiresAt);
+  }, []);
+  useDiscoveryExpiry(userId, expiresAt, applyDiscovery);
 
   const scanNearby = () => {
     Alert.alert("Why CatchYa needs location", "Location lets CatchYa request nearby profiles that have opted in and calculate only an approximate distance range. CatchYa uses foreground access for this scan only. It never shows exact coordinates or direction, and it does not track in the background.", [
@@ -84,6 +84,7 @@ export function DiscoverScreen({ navigation }: Props) {
   };
 
   const turnOffDiscovery = async () => {
+    setSavingDiscovery(true);
     // Hide the user immediately, then persist the opt-out.
     setDiscoveryOn(false);
     setExpiresAt(null);
@@ -91,8 +92,8 @@ export function DiscoverScreen({ navigation }: Props) {
     try {
       await saveDiscoveryPreferences(userId, false, selectedDuration);
     } catch {
-      Alert.alert("Couldn’t turn off discovery", "Please try again. Discovery is hidden on this screen while your change is saved.");
-    }
+      Alert.alert("Couldn’t turn off discovery", "Please try again. Discovery is off on this screen, but the change could not be saved. Reopen the screen and retry.");
+    } finally { setSavingDiscovery(false); }
   };
 
   const handleDiscoverySwitch = (nextValue: boolean) => {
@@ -131,7 +132,7 @@ export function DiscoverScreen({ navigation }: Props) {
     getDiscoverableProfiles(nearbyProfiles).filter((profile) => !blockedIds.includes(profile.id)),
     meetingPreferences,
   ), [blockedIds, meetingPreferences]);
-  const filteredProfiles = eligibleProfiles;
+  const filteredProfiles = discoveryOn ? eligibleProfiles : [];
 
   const openProfile = (profile: NearbyProfile) => navigation.navigate("ProfileDetail", { profile });
 
@@ -156,7 +157,6 @@ export function DiscoverScreen({ navigation }: Props) {
               <View style={styles.statusTextWrap}>
                 <Text style={styles.statusTitle}>Nearby Discovery</Text>
                 <Text style={styles.statusCopy}>{discoveryOn ? "Nearby discovery is on" : "Nearby discovery is off"}</Text>
-                {discoveryOn ? <Text style={styles.statusDuration}>Visible for {selectedDuration}</Text> : null}
               </View>
               <Pressable
                 onPress={() => handleDiscoverySwitch(!discoveryOn)}
@@ -180,7 +180,7 @@ export function DiscoverScreen({ navigation }: Props) {
                 <Text style={styles.modalCopy}>Choose how long you want to be visible. Discovery will turn off automatically.</Text>
                 <View style={styles.durationRow}>{durations.map((duration) => {
                   const selected = duration === draftDuration;
-                  return <Pressable key={duration} onPress={() => setDraftDuration(duration)} accessibilityRole="radio" accessibilityState={{ selected }} style={[styles.durationChip, selected && styles.durationChipSelected]}><Text style={[styles.durationText, selected && styles.durationTextSelected]}>{duration}</Text></Pressable>;
+                  return <Pressable key={duration} onPress={() => setDraftDuration(duration)} disabled={savingDiscovery} accessibilityRole="radio" accessibilityState={{ selected }} style={[styles.durationChip, selected && styles.durationChipSelected]}><Text style={[styles.durationText, selected && styles.durationTextSelected]}>{duration}</Text></Pressable>;
                 })}</View>
                 <View style={styles.editorActions}>
                   <Pressable onPress={() => setShowDurationPicker(false)} disabled={savingDiscovery} accessibilityRole="button" style={[styles.editorBtn, styles.editorCancel]}><Text style={styles.editorCancelText}>Cancel</Text></Pressable>

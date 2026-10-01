@@ -1,8 +1,9 @@
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useState } from "react";
 import { ActivityIndicator, Alert, Image, Linking, Modal, Pressable, ScrollView, StyleSheet, Switch, Text, View, useWindowDimensions } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { useFocusEffect } from "@react-navigation/native";
+import { useDiscoveryExpiry } from "@/hooks/useDiscoveryExpiry";
 import { useAuth } from "@/context/AuthContext";
 import { useAppAppearance, type AppearanceChoice } from "@/context/AppearanceContext";
 import { registerForPushNotifications } from "@/services/notifications";
@@ -27,7 +28,7 @@ const platformLabels: Record<SocialPlatform, string> = {
 export function SettingsScreen({ navigation }: Props) {
   const styles = useThemedStyles(makeStyles);
   const { colors } = useTheme();
-  const { width: windowWidth } = useWindowDimensions();
+  const { width: windowWidth, fontScale } = useWindowDimensions();
   const { userId, signOut, deleteAccount } = useAuth();
   const { choice: appearanceChoice, setChoice: setAppearanceChoice } = useAppAppearance();
   const [profile, setProfile] = useState<CurrentUser | null>(null);
@@ -42,6 +43,7 @@ export function SettingsScreen({ navigation }: Props) {
 
   useFocusEffect(useCallback(() => {
     let active = true;
+    setLoading(true);
     const notificationKey = `catchya:notificationsEnabled:${userId ?? "local"}`;
     Promise.all([
       loadProfile(userId).catch(() => null),
@@ -60,22 +62,16 @@ export function SettingsScreen({ navigation }: Props) {
     return () => { active = false; };
   }, [userId]));
 
-  useEffect(() => {
-    if (!discovery.enabled || !discovery.expiresAt) return;
-    const timer = setTimeout(() => {
-      const expired = { ...discovery, enabled: false, expiresAt: null };
-      setDiscovery(expired);
-      void saveDiscoveryPreferences(userId, false, discovery.duration);
-    }, Math.max(0, discovery.expiresAt - Date.now()));
-    return () => clearTimeout(timer);
-  }, [discovery, userId]);
+  useDiscoveryExpiry(userId, discovery.expiresAt, setDiscovery);
 
   const toggleDiscovery = async (enabled: boolean) => {
     if (discoveryBusy) return;
     if (!enabled) {
+      setDiscoveryBusy(true);
       setDiscovery((current) => ({ ...current, enabled: false, expiresAt: null }));
       try { await saveDiscoveryPreferences(userId, false, discovery.duration); }
-      catch { Alert.alert("Couldn’t turn off discovery", "Please try again."); }
+      catch { Alert.alert("Couldn’t turn off discovery", "Your change could not be saved. Reopen this screen and retry."); }
+      finally { setDiscoveryBusy(false); }
       return;
     }
     setDraftDiscoveryDuration(discovery.duration);
@@ -104,11 +100,13 @@ export function SettingsScreen({ navigation }: Props) {
   };
 
   const chooseDuration = async (duration: VisibilityDuration) => {
+    if (discoveryBusy || loading) return;
+    setDiscoveryBusy(true);
     try {
       setDiscovery(await saveDiscoveryPreferences(userId, discovery.enabled, duration));
     } catch {
       Alert.alert("Couldn’t save duration", "Please try again.");
-    }
+    } finally { setDiscoveryBusy(false); }
   };
 
   const toggleNotifications = async (enabled: boolean) => {
@@ -164,10 +162,10 @@ export function SettingsScreen({ navigation }: Props) {
       <SectionHeading title="Appearance" />
       <View style={styles.card}>
         <Text style={styles.rowDescription}>Choose Light or Dark, or follow your device with System default.</Text>
-        <View style={[styles.appearanceChoices, windowWidth <= 430 && styles.appearanceChoicesNarrow]}>{(["light", "dark", "system"] as AppearanceChoice[]).map((option) => {
+        <View style={[styles.appearanceChoices, (windowWidth <= 430 || fontScale > 1.2) && styles.appearanceChoicesNarrow]}>{(["light", "dark", "system"] as AppearanceChoice[]).map((option) => {
           const selected = appearanceChoice === option;
           const label = option === "system" ? "System default" : option[0].toUpperCase() + option.slice(1);
-          return <Pressable key={option} onPress={() => void setAppearanceChoice(option)} accessibilityRole="radio" accessibilityState={{ selected }} accessibilityLabel={`${label} appearance`} style={[styles.appearanceOption, windowWidth <= 430 && styles.appearanceOptionNarrow, selected && styles.appearanceSelected]}><Ionicons name={option === "light" ? "sunny-outline" : option === "dark" ? "moon-outline" : "phone-portrait-outline"} size={17} color={selected ? colors.accent : colors.muted} /><Text style={[styles.appearanceLabel, selected && styles.appearanceLabelSelected]}>{label}</Text></Pressable>;
+          return <Pressable key={option} onPress={() => void setAppearanceChoice(option)} accessibilityRole="radio" accessibilityState={{ selected }} accessibilityLabel={`${label} appearance`} style={[styles.appearanceOption, (windowWidth <= 430 || fontScale > 1.2) && styles.appearanceOptionNarrow, selected && styles.appearanceSelected]}><Ionicons name={option === "light" ? "sunny-outline" : option === "dark" ? "moon-outline" : "phone-portrait-outline"} size={17} color={selected ? colors.accent : colors.muted} /><Text style={[styles.appearanceLabel, selected && styles.appearanceLabelSelected]}>{label}</Text></Pressable>;
         })}</View>
       </View>
 
@@ -238,7 +236,7 @@ export function SettingsScreen({ navigation }: Props) {
             <Text style={styles.modalCopy}>Choose how long you want to be visible. Discovery will turn off automatically.</Text>
             {durations.map((duration) => {
               const selected = draftDiscoveryDuration === duration;
-              return <Pressable key={duration} onPress={() => setDraftDiscoveryDuration(duration)} accessibilityRole="radio" accessibilityState={{ selected }} style={[styles.durationChoice, selected && styles.durationChoiceSelected]}><Text style={[styles.durationChoiceText, selected && styles.durationChoiceTextSelected]}>{duration}</Text><Ionicons name={selected ? "radio-button-on" : "radio-button-off"} size={18} color={selected ? colors.accent : colors.muted} /></Pressable>;
+              return <Pressable key={duration} onPress={() => setDraftDiscoveryDuration(duration)} disabled={discoveryBusy} accessibilityRole="radio" accessibilityState={{ selected }} style={[styles.durationChoice, selected && styles.durationChoiceSelected]}><Text style={[styles.durationChoiceText, selected && styles.durationChoiceTextSelected]}>{duration}</Text><Ionicons name={selected ? "radio-button-on" : "radio-button-off"} size={18} color={selected ? colors.accent : colors.muted} /></Pressable>;
             })}
             <View style={styles.modalActions}>
               <Pressable onPress={() => setShowDiscoveryDurationPicker(false)} disabled={discoveryBusy} accessibilityRole="button" style={[styles.modalButton, styles.modalCancel]}><Text style={styles.modalCancelText}>Cancel</Text></Pressable>
