@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useState } from "react";
-import { ActivityIndicator, Alert, Image, Linking, Pressable, ScrollView, StyleSheet, Switch, Text, View } from "react-native";
+import { ActivityIndicator, Alert, Image, Linking, Modal, Pressable, ScrollView, StyleSheet, Switch, Text, View, useWindowDimensions } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { useFocusEffect } from "@react-navigation/native";
@@ -18,7 +18,7 @@ import type { NativeStackScreenProps } from "@react-navigation/native-stack";
 import type { AppStackParamList } from "@/navigation/AppTabs";
 
 type Props = NativeStackScreenProps<AppStackParamList, "Settings">;
-const durations: VisibilityDuration[] = ["15 minutes", "1 hour", "Until turned off"];
+const durations: VisibilityDuration[] = ["15 minutes", "30 minutes", "1 hour"];
 const platformLabels: Record<SocialPlatform, string> = {
   facebook: "Facebook", telegram: "Telegram", x: "X", tiktok: "TikTok",
   instagram: "Instagram", line: "LINE", whatsapp: "WhatsApp", wechat: "WeChat",
@@ -27,6 +27,7 @@ const platformLabels: Record<SocialPlatform, string> = {
 export function SettingsScreen({ navigation }: Props) {
   const styles = useThemedStyles(makeStyles);
   const { colors } = useTheme();
+  const { width: windowWidth } = useWindowDimensions();
   const { userId, signOut, deleteAccount } = useAuth();
   const { choice: appearanceChoice, setChoice: setAppearanceChoice } = useAppAppearance();
   const [profile, setProfile] = useState<CurrentUser | null>(null);
@@ -36,6 +37,8 @@ export function SettingsScreen({ navigation }: Props) {
   const [notificationsOn, setNotificationsOn] = useState(false);
   const [loading, setLoading] = useState(true);
   const [discoveryBusy, setDiscoveryBusy] = useState(false);
+  const [showDiscoveryDurationPicker, setShowDiscoveryDurationPicker] = useState(false);
+  const [draftDiscoveryDuration, setDraftDiscoveryDuration] = useState<VisibilityDuration>("15 minutes");
 
   useFocusEffect(useCallback(() => {
     let active = true;
@@ -69,19 +72,30 @@ export function SettingsScreen({ navigation }: Props) {
 
   const toggleDiscovery = async (enabled: boolean) => {
     if (discoveryBusy) return;
+    if (!enabled) {
+      setDiscovery((current) => ({ ...current, enabled: false, expiresAt: null }));
+      try { await saveDiscoveryPreferences(userId, false, discovery.duration); }
+      catch { Alert.alert("Couldn’t turn off discovery", "Please try again."); }
+      return;
+    }
+    setDraftDiscoveryDuration(discovery.duration);
+    setShowDiscoveryDurationPicker(true);
+  };
+
+  const enableDiscoveryFor = async (duration: VisibilityDuration) => {
+    if (discoveryBusy) return;
     setDiscoveryBusy(true);
     try {
-      if (enabled) {
-        const permission = await requestLocationPermission();
-        if (permission !== "granted") {
-          Alert.alert("Location permission needed", "Nearby discovery uses foreground location to find opted-in people and show an approximate distance range. CatchYa never displays your exact location.", [
-            { text: "Not now", style: "cancel" },
-            { text: "Open Settings", onPress: () => { void Linking.openSettings(); } },
-          ]);
-          return;
-        }
+      const permission = await requestLocationPermission();
+      if (permission !== "granted") {
+        Alert.alert("Location permission needed", "Nearby discovery uses foreground location to find opted-in people and show an approximate distance range. CatchYa never displays your exact location.", [
+          { text: "Not now", style: "cancel" },
+          { text: "Open Settings", onPress: () => { void Linking.openSettings(); } },
+        ]);
+        return;
       }
-      setDiscovery(await saveDiscoveryPreferences(userId, enabled, discovery.duration));
+      setDiscovery(await saveDiscoveryPreferences(userId, true, duration));
+      setShowDiscoveryDurationPicker(false);
     } catch {
       Alert.alert("Couldn’t update discovery", "Please try again.");
     } finally {
@@ -150,10 +164,10 @@ export function SettingsScreen({ navigation }: Props) {
       <SectionHeading title="Appearance" />
       <View style={styles.card}>
         <Text style={styles.rowDescription}>Choose Light or Dark, or follow your device with System default.</Text>
-        <View style={styles.appearanceChoices}>{(["light", "dark", "system"] as AppearanceChoice[]).map((option) => {
+        <View style={[styles.appearanceChoices, windowWidth <= 430 && styles.appearanceChoicesNarrow]}>{(["light", "dark", "system"] as AppearanceChoice[]).map((option) => {
           const selected = appearanceChoice === option;
           const label = option === "system" ? "System default" : option[0].toUpperCase() + option.slice(1);
-          return <Pressable key={option} onPress={() => void setAppearanceChoice(option)} accessibilityRole="radio" accessibilityState={{ selected }} accessibilityLabel={`${label} appearance`} style={[styles.appearanceOption, selected && styles.appearanceSelected]}><Ionicons name={option === "light" ? "sunny-outline" : option === "dark" ? "moon-outline" : "phone-portrait-outline"} size={16} color={selected ? colors.accent : colors.muted} /><Text style={[styles.appearanceLabel, selected && styles.appearanceLabelSelected]}>{label}</Text></Pressable>;
+          return <Pressable key={option} onPress={() => void setAppearanceChoice(option)} accessibilityRole="radio" accessibilityState={{ selected }} accessibilityLabel={`${label} appearance`} style={[styles.appearanceOption, windowWidth <= 430 && styles.appearanceOptionNarrow, selected && styles.appearanceSelected]}><Ionicons name={option === "light" ? "sunny-outline" : option === "dark" ? "moon-outline" : "phone-portrait-outline"} size={17} color={selected ? colors.accent : colors.muted} /><Text style={[styles.appearanceLabel, selected && styles.appearanceLabelSelected]}>{label}</Text></Pressable>;
         })}</View>
       </View>
 
@@ -217,6 +231,22 @@ export function SettingsScreen({ navigation }: Props) {
         <View style={styles.rowDivider} />
         <SettingsRow icon="information-circle-outline" title="About CatchYa" description="This starter app stores profile and inbox data on this device" onPress={() => Alert.alert("About CatchYa", "CatchYa’s sign-in, messaging, and account services need a live backend before information can sync between users or account deletion can be completed online.", [{ text: "Done" }])} />
       </View>
+      <Modal transparent visible={showDiscoveryDurationPicker} animationType="fade" onRequestClose={() => { if (!discoveryBusy) setShowDiscoveryDurationPicker(false); }}>
+        <View style={styles.modalBackdrop}>
+          <View style={styles.durationModal}>
+            <Text style={styles.modalTitle}>Turn on nearby discovery</Text>
+            <Text style={styles.modalCopy}>Choose how long you want to be visible. Discovery will turn off automatically.</Text>
+            {durations.map((duration) => {
+              const selected = draftDiscoveryDuration === duration;
+              return <Pressable key={duration} onPress={() => setDraftDiscoveryDuration(duration)} accessibilityRole="radio" accessibilityState={{ selected }} style={[styles.durationChoice, selected && styles.durationChoiceSelected]}><Text style={[styles.durationChoiceText, selected && styles.durationChoiceTextSelected]}>{duration}</Text><Ionicons name={selected ? "radio-button-on" : "radio-button-off"} size={18} color={selected ? colors.accent : colors.muted} /></Pressable>;
+            })}
+            <View style={styles.modalActions}>
+              <Pressable onPress={() => setShowDiscoveryDurationPicker(false)} disabled={discoveryBusy} accessibilityRole="button" style={[styles.modalButton, styles.modalCancel]}><Text style={styles.modalCancelText}>Cancel</Text></Pressable>
+              <Pressable onPress={() => void enableDiscoveryFor(draftDiscoveryDuration)} disabled={discoveryBusy} accessibilityRole="button" style={[styles.modalButton, styles.modalConfirm, discoveryBusy && styles.disabledControl]}><Text style={styles.modalConfirmText}>{discoveryBusy ? "Turning on…" : "Confirm"}</Text></Pressable>
+            </View>
+          </View>
+        </View>
+      </Modal>
     </ScrollView>
   );
 }
@@ -245,10 +275,26 @@ const makeStyles = (colors: Palette) => StyleSheet.create({
   sectionTitle: { color: colors.text, fontSize: 13.5, fontWeight: "800" },
   sectionCaption: { color: colors.muted, fontSize: 10.5 },
   appearanceChoices: { flexDirection: "row", gap: 7, marginTop: 10 },
-  appearanceOption: { flex: 1, minHeight: 40, borderWidth: 1, borderColor: colors.border, borderRadius: radii.md, backgroundColor: colors.surface, flexDirection: "row", gap: 5, alignItems: "center", justifyContent: "center" },
+  appearanceChoicesNarrow: { flexDirection: "column", gap: 8 },
+  appearanceOption: { flex: 1, minHeight: 44, borderWidth: 1, borderColor: colors.border, borderRadius: radii.md, backgroundColor: colors.surface, flexDirection: "row", gap: 8, alignItems: "center", justifyContent: "center", paddingHorizontal: 10 },
+  appearanceOptionNarrow: { flex: 0, width: "100%", minHeight: 46, justifyContent: "flex-start", paddingHorizontal: 12 },
   appearanceSelected: { borderColor: colors.accent, backgroundColor: colors.borderSoft },
-  appearanceLabel: { color: colors.muted, fontSize: 11, fontWeight: "700" },
+  appearanceLabel: { color: colors.muted, fontSize: 12, fontWeight: "700", flexShrink: 1 },
   appearanceLabelSelected: { color: colors.accent },
+  modalBackdrop: { flex: 1, padding: 20, backgroundColor: "rgba(0,0,0,0.48)", alignItems: "center", justifyContent: "center" },
+  durationModal: { width: "100%", maxWidth: 420, padding: 18, borderRadius: radii.lg, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border },
+  modalTitle: { color: colors.text, fontSize: 17, fontWeight: "800" },
+  modalCopy: { color: colors.muted, fontSize: 12, lineHeight: 18, marginTop: 6, marginBottom: 13 },
+  durationChoice: { minHeight: 44, flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingHorizontal: 11, borderWidth: 1, borderColor: colors.border, borderRadius: radii.md, marginBottom: 7, backgroundColor: colors.surface },
+  durationChoiceSelected: { borderColor: colors.accent, backgroundColor: colors.accentSoft },
+  durationChoiceText: { color: colors.text, fontSize: 12, fontWeight: "700" },
+  durationChoiceTextSelected: { color: colors.accent },
+  modalActions: { flexDirection: "row", gap: 8, marginTop: 7 },
+  modalButton: { flex: 1, minHeight: 42, borderRadius: radii.md, borderWidth: 1, alignItems: "center", justifyContent: "center" },
+  modalCancel: { backgroundColor: colors.surface, borderColor: colors.border },
+  modalCancelText: { color: colors.text, fontSize: 13, fontWeight: "700" },
+  modalConfirm: { backgroundColor: colors.accent, borderColor: colors.accent },
+  modalConfirmText: { color: colors.accentInk, fontSize: 13, fontWeight: "800" },
   card: { backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, borderRadius: radii.lg, paddingHorizontal: 11, paddingVertical: 7, marginBottom: 5 },
   settingsRow: { flexDirection: "row", alignItems: "center", gap: 10, minHeight: 58, paddingVertical: 8 },
   switchRow: { flexDirection: "row", alignItems: "center", gap: 10, minHeight: 68, paddingVertical: 8 },

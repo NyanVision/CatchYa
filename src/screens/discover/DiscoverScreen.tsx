@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
-import { Alert, FlatList, Image, Pressable, StyleSheet, Text, View } from "react-native";
+import { Alert, FlatList, Image, Modal, Pressable, StyleSheet, Text, View } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import { useFocusEffect } from "@react-navigation/native";
 import { Button } from "@/components/Button";
@@ -17,11 +17,7 @@ import type { AppStackParamList } from "@/navigation/AppTabs";
 import type { VisibilityDuration } from "@/services/discoveryPreferences";
 
 type Props = NativeStackScreenProps<AppStackParamList, "Discover">;
-const durations: VisibilityDuration[] = ["15 minutes", "1 hour", "Until turned off"];
-
-function durationPhrase(duration: VisibilityDuration) {
-  return duration === "Until turned off" ? "until turned off" : `for ${duration}`;
-}
+const durations: VisibilityDuration[] = ["15 minutes", "30 minutes", "1 hour"];
 
 export function DiscoverScreen({ navigation }: Props) {
   const styles = useThemedStyles(makeStyles);
@@ -30,9 +26,10 @@ export function DiscoverScreen({ navigation }: Props) {
   const [discoveryOn, setDiscoveryOn] = useState(false);
   const [selectedDuration, setSelectedDuration] = useState<VisibilityDuration>("15 minutes");
   const [expiresAt, setExpiresAt] = useState<number | null>(null);
-  const [editingDuration, setEditingDuration] = useState(false);
   const [draftDuration, setDraftDuration] = useState<VisibilityDuration>("15 minutes");
-  const [savingDuration, setSavingDuration] = useState(false);
+  const [showDurationPicker, setShowDurationPicker] = useState(false);
+  const [savingDiscovery, setSavingDiscovery] = useState(false);
+  const [discoveryReady, setDiscoveryReady] = useState(false);
   const [blockedIds, setBlockedIds] = useState<string[]>([]);
   const [meetingPreferences, setMeetingPreferences] = useState<MeetingOption[]>([]);
   const [radarState, setRadarState] = useState<"idle" | "scanning" | "permission" | "empty" | "error">("idle");
@@ -44,12 +41,14 @@ export function DiscoverScreen({ navigation }: Props) {
       setDiscoveryOn(preferences.enabled);
       setSelectedDuration(preferences.duration);
       setExpiresAt(preferences.expiresAt);
+      setDiscoveryReady(true);
       setBlockedIds(blocked.map((profile) => profile.profileId));
       setMeetingPreferences(aboutYou.meeting);
     }).catch(() => {
       if (active) {
         setDiscoveryOn(false);
         setExpiresAt(null);
+        setDiscoveryReady(true);
       }
     });
     return () => { active = false; };
@@ -60,7 +59,6 @@ export function DiscoverScreen({ navigation }: Props) {
     const timer = setTimeout(() => {
       setDiscoveryOn(false);
       setExpiresAt(null);
-      setEditingDuration(false);
       void saveDiscoveryPreferences(userId, false, selectedDuration);
     }, Math.max(0, expiresAt - Date.now()));
     return () => clearTimeout(timer);
@@ -85,36 +83,48 @@ export function DiscoverScreen({ navigation }: Props) {
     } catch { setRadarState("error"); }
   };
 
-  const enableDiscovery = async () => {
-    const result = await requestLocationPermission();
-    if (result === "granted") {
-      const preferences = await saveDiscoveryPreferences(userId, true, selectedDuration);
-      setDiscoveryOn(preferences.enabled);
-      setExpiresAt(preferences.expiresAt);
+  const turnOffDiscovery = async () => {
+    // Hide the user immediately, then persist the opt-out.
+    setDiscoveryOn(false);
+    setExpiresAt(null);
+    setShowDurationPicker(false);
+    try {
+      await saveDiscoveryPreferences(userId, false, selectedDuration);
+    } catch {
+      Alert.alert("Couldn’t turn off discovery", "Please try again. Discovery is hidden on this screen while your change is saved.");
     }
   };
 
-  const openDurationEditor = () => { setDraftDuration(selectedDuration); setEditingDuration(true); };
-  const closeDurationEditor = () => setEditingDuration(false);
-
-  const saveDuration = async () => {
-    if (!discoveryOn || savingDuration) return;
-    setSavingDuration(true);
-    try {
-      const preferences = await saveDiscoveryPreferences(userId, true, draftDuration);
-      setSelectedDuration(preferences.duration);
-      setExpiresAt(preferences.expiresAt);
-      setEditingDuration(false);
-    } catch {
-      Alert.alert("Couldn’t save", "Your visibility duration was not changed. Please try again.");
-    } finally { setSavingDuration(false); }
+  const handleDiscoverySwitch = (nextValue: boolean) => {
+    if (!discoveryReady || savingDiscovery) return;
+    if (!nextValue) {
+      void turnOffDiscovery();
+      return;
+    }
+    setDraftDuration(selectedDuration);
+    setShowDurationPicker(true);
   };
 
-  const turnOffDiscovery = async () => {
-    await saveDiscoveryPreferences(userId, false, selectedDuration);
-    setDiscoveryOn(false);
-    setExpiresAt(null);
-    setEditingDuration(false);
+  const confirmDiscoveryDuration = async () => {
+    if (savingDiscovery) return;
+    setSavingDiscovery(true);
+    try {
+      const permission = await requestLocationPermission();
+      if (permission !== "granted") {
+        setShowDurationPicker(false);
+        Alert.alert("Location permission needed", "Allow foreground location to use nearby discovery. Your exact location is never shown.");
+        return;
+      }
+      const preferences = await saveDiscoveryPreferences(userId, true, draftDuration);
+      setSelectedDuration(preferences.duration);
+      setDiscoveryOn(preferences.enabled);
+      setExpiresAt(preferences.expiresAt);
+      setShowDurationPicker(false);
+    } catch {
+      Alert.alert("Couldn’t turn on discovery", "Your setting was not saved. Please try again.");
+    } finally {
+      setSavingDiscovery(false);
+    }
   };
 
   const eligibleProfiles = useMemo(() => filterProfilesByAudience(
@@ -144,26 +154,41 @@ export function DiscoverScreen({ navigation }: Props) {
             <View style={styles.statusRow}>
               <View style={[styles.statusIcon, discoveryOn ? styles.statusIconOn : styles.statusIconOff]}><Ionicons name={discoveryOn ? "eye-outline" : "eye-off-outline"} size={19} color={discoveryOn ? colors.success : colors.accent} /></View>
               <View style={styles.statusTextWrap}>
-                <Text style={styles.statusTitle}>{discoveryOn ? `Visible to people nearby ${durationPhrase(selectedDuration)}` : "Nearby discovery is off."}</Text>
+                <Text style={styles.statusTitle}>Nearby Discovery</Text>
+                <Text style={styles.statusCopy}>{discoveryOn ? "Nearby discovery is on" : "Nearby discovery is off"}</Text>
+                {discoveryOn ? <Text style={styles.statusDuration}>Visible for {selectedDuration}</Text> : null}
               </View>
-              {discoveryOn && !editingDuration ? <Pressable onPress={openDurationEditor} accessibilityRole="button" accessibilityLabel="Edit visibility duration" hitSlop={8} style={styles.editButton}><Ionicons name="create-outline" size={14} color={colors.accent} /><Text style={styles.editButtonText}>Edit</Text></Pressable> : null}
+              <Pressable
+                onPress={() => handleDiscoverySwitch(!discoveryOn)}
+                disabled={!discoveryReady || savingDiscovery}
+                accessibilityRole="switch"
+                accessibilityLabel="Nearby Discovery"
+                accessibilityState={{ checked: discoveryOn, disabled: !discoveryReady || savingDiscovery }}
+                style={[styles.switchTouchTarget, (!discoveryReady || savingDiscovery) && styles.disabledSwitch]}
+              >
+                <View style={[styles.switchTrack, discoveryOn ? styles.switchTrackOn : styles.switchTrackOff]}>
+                  <View style={[styles.switchThumb, discoveryOn ? styles.switchThumbOn : styles.switchThumbOff]} />
+                </View>
+              </Pressable>
             </View>
-            {discoveryOn && editingDuration ? <View style={styles.editor}>
-              <View style={styles.editorHeader}>
-                <Text style={styles.durationLabel}>Visibility duration</Text>
-                <Pressable onPress={closeDurationEditor} accessibilityRole="button" accessibilityLabel="Close duration editor" hitSlop={10}><Ionicons name="close" size={18} color={colors.muted} /></Pressable>
-              </View>
-              <View style={styles.durationRow}>{durations.map((duration) => {
-                const selected = duration === draftDuration;
-                return <Pressable key={duration} onPress={() => setDraftDuration(duration)} accessibilityRole="button" accessibilityState={{ selected }} style={[styles.durationChip, selected && styles.durationChipSelected]}><Text style={[styles.durationText, selected && styles.durationTextSelected]}>{duration}</Text></Pressable>;
-              })}</View>
-              <View style={styles.editorActions}>
-                <Pressable onPress={closeDurationEditor} accessibilityRole="button" style={[styles.editorBtn, styles.editorCancel]}><Text style={styles.editorCancelText}>Cancel</Text></Pressable>
-                <Pressable onPress={() => void saveDuration()} disabled={savingDuration} accessibilityRole="button" style={[styles.editorBtn, styles.editorSave, savingDuration && { opacity: 0.6 }]}><Text style={styles.editorSaveText}>{savingDuration ? "Saving…" : "Save"}</Text></Pressable>
-              </View>
-            </View> : null}
-            {discoveryOn && !editingDuration ? <Pressable onPress={turnOffDiscovery} accessibilityRole="button" style={styles.turnOffLink}><Text style={styles.actionText}>Turn off nearby discovery</Text></Pressable> : null}
           </View>
+
+          <Modal transparent visible={showDurationPicker} animationType="fade" onRequestClose={() => { if (!savingDiscovery) setShowDurationPicker(false); }}>
+            <View style={styles.modalBackdrop}>
+              <View style={styles.durationModal}>
+                <Text style={styles.modalTitle}>Turn on nearby discovery</Text>
+                <Text style={styles.modalCopy}>Choose how long you want to be visible. Discovery will turn off automatically.</Text>
+                <View style={styles.durationRow}>{durations.map((duration) => {
+                  const selected = duration === draftDuration;
+                  return <Pressable key={duration} onPress={() => setDraftDuration(duration)} accessibilityRole="radio" accessibilityState={{ selected }} style={[styles.durationChip, selected && styles.durationChipSelected]}><Text style={[styles.durationText, selected && styles.durationTextSelected]}>{duration}</Text></Pressable>;
+                })}</View>
+                <View style={styles.editorActions}>
+                  <Pressable onPress={() => setShowDurationPicker(false)} disabled={savingDiscovery} accessibilityRole="button" style={[styles.editorBtn, styles.editorCancel]}><Text style={styles.editorCancelText}>Cancel</Text></Pressable>
+                  <Pressable onPress={() => void confirmDiscoveryDuration()} disabled={savingDiscovery} accessibilityRole="button" style={[styles.editorBtn, styles.editorSave, savingDiscovery && { opacity: 0.6 }]}><Text style={styles.editorSaveText}>{savingDiscovery ? "Turning on…" : "Confirm"}</Text></Pressable>
+                </View>
+              </View>
+            </View>
+          </Modal>
 
           <View style={styles.radarCard}>
             <View style={styles.radarGlyph}><Ionicons name="radio-outline" size={25} color={colors.accent} /></View>
@@ -175,12 +200,10 @@ export function DiscoverScreen({ navigation }: Props) {
             {radarState === "error" ? <Text style={styles.radarError}>The scan could not finish. Check location services and try again.</Text> : null}
           </View>
 
-          {!discoveryOn ? <View style={styles.setupCard}>
+          <View style={styles.setupCard}>
             <View style={styles.setupTitleRow}><Ionicons name="shield-checkmark-outline" size={17} color={colors.success} /><Text style={styles.setupTitle}>Your exact location is never displayed</Text></View>
-            <Text style={styles.setupCopy}>People see an approximate distance range only. You can change how long you’re visible after you turn it on.</Text>
-            <Button label="Turn on nearby discovery" variant="primary" onPress={enableDiscovery} />
-            <Text style={styles.skipNote}>Skip for now by leaving discovery off. You can turn it on whenever you want.</Text>
-          </View> : null}
+            <Text style={styles.setupCopy}>People see an approximate distance range only. Choose a time period when turning discovery on, and switch it off whenever you want.</Text>
+          </View>
 
           <View style={styles.resultsHeading}><Text style={styles.sectionTitle}>People nearby</Text><Text style={styles.resultCount}>{filteredProfiles.length}</Text></View>
           {meetingPreferences.length > 0 ? <Text style={styles.privateFilterNote}>Personalized with your private Discover preferences</Text> : null}
@@ -241,11 +264,14 @@ const makeStyles = (colors: Palette) => StyleSheet.create({
   statusIconOff: { backgroundColor: colors.accentSoft },
   statusRow: { flexDirection: "row", alignItems: "center", gap: 10 },
   statusTextWrap: { flex: 1, minWidth: 0 },
-  editButton: { flexDirection: "row", alignItems: "center", gap: 4, minHeight: 34, paddingHorizontal: 11, borderRadius: radii.pill, backgroundColor: colors.accentSoft },
-  editButtonText: { color: colors.accent, fontSize: 12, fontWeight: "800" },
-  turnOffLink: { alignSelf: "flex-start", marginTop: 10, marginLeft: 46, paddingVertical: 4 },
-  editor: { marginTop: 12, paddingTop: 12, borderTopWidth: 1, borderTopColor: colors.successSoftBorder },
-  editorHeader: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginBottom: 8 },
+  switchTouchTarget: { minWidth: 50, minHeight: 44, alignItems: "center", justifyContent: "center" },
+  disabledSwitch: { opacity: 0.55 },
+  switchTrack: { width: 48, height: 28, borderRadius: radii.pill, justifyContent: "center", paddingHorizontal: 3, borderWidth: 1 },
+  switchTrackOff: { backgroundColor: colors.borderSoft, borderColor: colors.border },
+  switchTrackOn: { backgroundColor: colors.accent, borderColor: colors.accent },
+  switchThumb: { width: 20, height: 20, borderRadius: radii.pill, backgroundColor: "#FFFFFF", elevation: 2 },
+  switchThumbOff: { alignSelf: "flex-start" },
+  switchThumbOn: { alignSelf: "flex-end" },
   editorActions: { flexDirection: "row", gap: 8 },
   editorBtn: { flex: 1, minHeight: 40, borderRadius: radii.md, alignItems: "center", justifyContent: "center", borderWidth: 1 },
   editorCancel: { backgroundColor: colors.surface, borderColor: colors.border },
@@ -254,6 +280,11 @@ const makeStyles = (colors: Palette) => StyleSheet.create({
   editorSaveText: { color: colors.accentInk, fontSize: 13, fontWeight: "800" },
   statusTitle: { color: colors.text, fontSize: 13, fontWeight: "800" },
   statusCopy: { color: colors.muted, fontSize: 11.5, marginTop: 3, lineHeight: 16 },
+  statusDuration: { color: colors.muted, fontSize: 10.5, marginTop: 2, lineHeight: 14 },
+  modalBackdrop: { flex: 1, padding: 20, backgroundColor: "rgba(0,0,0,0.48)", alignItems: "center", justifyContent: "center" },
+  durationModal: { width: "100%", maxWidth: 420, padding: 18, borderRadius: radii.lg, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border },
+  modalTitle: { color: colors.text, fontSize: 17, fontWeight: "800" },
+  modalCopy: { color: colors.muted, fontSize: 12, lineHeight: 18, marginTop: 6, marginBottom: 16 },
   actionText: { color: colors.accent, fontSize: 12, fontWeight: "800" },
   radarCard: { padding: 14, backgroundColor: colors.surface, borderRadius: radii.lg, borderWidth: 1, borderColor: colors.border, marginBottom: 14, alignItems: "flex-start" },
   radarGlyph: { width: 44, height: 44, borderRadius: 15, backgroundColor: colors.borderSoft, alignItems: "center", justifyContent: "center", marginBottom: 10 },

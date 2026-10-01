@@ -1,6 +1,6 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
 
-export type VisibilityDuration = "15 minutes" | "1 hour" | "Until turned off";
+export type VisibilityDuration = "15 minutes" | "30 minutes" | "1 hour";
 
 export interface DiscoveryPreferences {
   enabled: boolean;
@@ -8,7 +8,7 @@ export interface DiscoveryPreferences {
   expiresAt: number | null;
 }
 
-const DURATIONS: VisibilityDuration[] = ["15 minutes", "1 hour", "Until turned off"];
+const DURATIONS: VisibilityDuration[] = ["15 minutes", "30 minutes", "1 hour"];
 
 function keyFor(userId: string | null) {
   return `catchya:discovery:${userId ?? "local"}`;
@@ -24,13 +24,16 @@ export async function loadDiscoveryPreferences(userId: string | null): Promise<D
   const saved = JSON.parse(raw) as Partial<DiscoveryPreferences>;
   const duration = DURATIONS.includes(saved.duration as VisibilityDuration) ? saved.duration as VisibilityDuration : "15 minutes";
   const expiresAt = typeof saved.expiresAt === "number" ? saved.expiresAt : null;
-  const expired = !!saved.enabled && expiresAt !== null && expiresAt <= Date.now();
+  // Discovery is always time limited. Turn off legacy indefinite/corrupt sessions.
+  const expired = saved.enabled === true && (expiresAt === null || expiresAt <= Date.now());
   const preferences: DiscoveryPreferences = {
     enabled: saved.enabled === true && !expired,
     duration,
     expiresAt: saved.enabled === true && !expired ? expiresAt : null,
   };
-  if (expired) await AsyncStorage.setItem(keyFor(userId), JSON.stringify(preferences));
+  if (expired || (saved.enabled === true && !DURATIONS.includes(saved.duration as VisibilityDuration))) {
+    await AsyncStorage.setItem(keyFor(userId), JSON.stringify(preferences));
+  }
   return preferences;
 }
 
@@ -39,8 +42,9 @@ export async function saveDiscoveryPreferences(
   enabled: boolean,
   duration: VisibilityDuration,
 ): Promise<DiscoveryPreferences> {
-  const expiresAt = enabled && duration !== "Until turned off"
-    ? Date.now() + (duration === "15 minutes" ? 15 : 60) * 60 * 1000
+  const durationMinutes = duration === "15 minutes" ? 15 : duration === "30 minutes" ? 30 : 60;
+  const expiresAt = enabled
+    ? Date.now() + durationMinutes * 60 * 1000
     : null;
   const preferences = { enabled, duration, expiresAt };
   await AsyncStorage.setItem(keyFor(userId), JSON.stringify(preferences));
