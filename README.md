@@ -209,3 +209,4 @@ System default, and needs no backend. Colors come from `src/theme/colors.ts` (`l
 screens read them through `useTheme()` and `useThemedStyles(makeStyles)` from `src/context/AppearanceContext.tsx`.
 Never import a fixed color for UI — use the active palette so every screen follows the selected mode.
 # CatchYa
+# CatchYa
